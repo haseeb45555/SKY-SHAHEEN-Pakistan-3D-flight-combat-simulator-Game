@@ -30,6 +30,7 @@ Fly across Pakistan and other detailed environments in **Sky Shaheen**, a browse
 
 ## Play
 
+**Play Sky Shaheen online:** [Launch Game](https://sky-shaheen-3d-flight-combat.vercel.app/)
 **Play Sky Shaheen online:** [Launch Game](https://haseeb45555.github.io/SKY-SHAHEEN-Pakistan-3D-flight-combat-simulator-Game/)
 
 Open the game in a modern browser. On mobile, rotate your device to landscape for the best experience. On supported phones, use the install option in the browser to add it to your home screen.
