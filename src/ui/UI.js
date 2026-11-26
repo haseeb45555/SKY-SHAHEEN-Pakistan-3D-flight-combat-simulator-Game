@@ -15,7 +15,7 @@ import { AP_MODES } from '../engine/Autopilot.js';
 import { RadarScope } from './RadarScope.js';
 import { MenuMusic } from '../engine/MenuMusic.js';
 
-const MENU_OPTIONS = ['map', 'start', 'tod', 'difficulty', 'wingman', 'assist', 'quality', 'sensitivity', 'invertY', 'tilt', 'sound', 'haptics'];
+const MENU_OPTIONS = ['map', 'start', 'tod', 'difficulty', 'wingman', 'assist', 'quality', 'fps', 'sensitivity', 'invertY', 'tilt', 'sound', 'haptics'];
 const STICK_R = 58;
 const expo = (v) => v * (0.4 + 0.6 * v * v);
 
