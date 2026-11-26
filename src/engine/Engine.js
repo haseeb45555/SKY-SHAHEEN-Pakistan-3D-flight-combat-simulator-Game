@@ -8,9 +8,14 @@ const _v2 = new THREE.Vector2();
 export class Engine {
   constructor(canvas) {
     this.canvas = canvas;
+    // Phones: native MSAA on the screen buffer (cheap on tile-based mobile GPUs) removes the jagged,
+    // shimmering edges (the stencil buffer stays: Effects.planarShadow needs it). Desktop AA comes from
+    // the post pipeline (HIGH = 4x MSAA target) so it stays off there.
+    this.isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     this.renderer = new THREE.WebGLRenderer({
-      canvas, antialias: true, powerPreference: 'high-performance',
+      canvas, antialias: this.isTouch, powerPreference: 'high-performance',
     });
+    this.prMin = 0.65; this.prMax = 2;      // range used by the auto resolution scaler (Game.adaptResolution)
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -38,9 +43,11 @@ export class Engine {
     const dpr = window.devicePixelRatio || 1;
     let pixelRatio = Math.min(dpr, 2);
     let shadows = false;
-    if (q === 'mobile') { pixelRatio = Math.min(dpr, 1.5); shadows = false; }
+    // MOBILE: start sharp (1.5x, up to 2x on a 3x phone screen); the auto scaler trades it for frame rate
+    if (q === 'mobile') { pixelRatio = Math.min(dpr, 1.5); shadows = false; this.prMin = 0.8; this.prMax = Math.min(dpr, 2); }
     else if (q === 'low') { pixelRatio = Math.min(dpr, 1); shadows = false; }
     else if (q === 'high') { pixelRatio = Math.min(dpr, 2.5); shadows = true; }
+    if (q !== 'mobile') { this.prMin = 0.65; this.prMax = Math.min(dpr, 2); }
     this.renderer.setPixelRatio(pixelRatio);
     // HDR + bloom + grade on MEDIUM / HIGH; HIGH also gets 4x MSAA on the scene target
     // (?nopost in the URL turns the post pipeline off for comparison)
