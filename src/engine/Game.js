@@ -159,7 +159,9 @@ export class Game {
   ensureEnv(map) {
     const s = this.settings;
     let q = s.get('quality');
-    this.autoRes = q === 'auto';
+    // Mobile auto quality starts sharper, then dynamically scales render resolution
+    // if the GPU needs help to keep the frame rate smooth.
+    this.autoRes = q === 'auto' || q === 'mobile';
     if (q === 'auto') q = this.ui && this.ui.isTouch ? 'mobile' : 'med';
     const tod = s.get('tod'), envKey = this.envKey(map);
     map = map || s.get('map');
@@ -598,7 +600,7 @@ export class Game {
     const cur = r.getPixelRatio();
     let next = cur;
     if (this.frameMs > 22) next = Math.max(0.65, cur * 0.85);
-    else if (this.frameMs < 16.5) next = Math.min(Math.min(dpr, this.ui && this.ui.isTouch ? 1.25 : 2), cur * 1.06);
+    else if (this.frameMs < 16.5) next = Math.min(Math.min(dpr, this.ui && this.ui.isTouch ? 1.5 : 2), cur * 1.06);
     if (Math.abs(next - cur) > 0.02) { r.setPixelRatio(next); this.engine.resize(); }
   }
 
