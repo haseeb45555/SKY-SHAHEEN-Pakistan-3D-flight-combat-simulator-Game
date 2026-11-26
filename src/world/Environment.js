@@ -1022,8 +1022,8 @@ export class Environment {
   // edges, and drifting noise erosion. Flying into one fogs the world to white.
   buildClouds() {
     const q = this.quality;
-    const clusters = Math.round((q === 'low' ? 14 : q === 'high' ? 46 : 28) * this.map.clouds);
-    const perCluster = q === 'low' ? 12 : q === 'high' ? 32 : 22;
+    const clusters = Math.round((q === 'low' ? 14 : q === 'mobile' ? 20 : q === 'high' ? 46 : 28) * this.map.clouds);
+    const perCluster = q === 'low' ? 12 : q === 'mobile' ? 16 : q === 'high' ? 32 : 22;
     const cl = [], puffs = [];
     for (let i = 0; i < clusters; i++) {
       const big = 0.8 + Math.random() * 1.2;
@@ -1515,9 +1515,10 @@ export class Environment {
     const styles = {};
     // real maps: districts of a whole metro area instead of one 1.15 km town
     const urban = this.map.urban, real = !!(urban && this.hf.zones);
-    const target = real ? (this.quality === 'low' ? 1000 : this.quality === 'high' ? 5200 : 2200) : (this.quality === 'low' ? 320 : 820);
+    const mob = this.quality === 'mobile';
+    const target = real ? (this.quality === 'low' ? 1000 : mob ? 1500 : this.quality === 'high' ? 5200 : 2200) : (this.quality === 'low' ? 320 : mob ? 600 : 820);
     // plus whole street blocks built out around them (see the fill pass below)
-    const fillMax = real ? (this.quality === 'low' ? 1200 : this.quality === 'high' ? 9000 : 3000) : 0;
+    const fillMax = real ? (this.quality === 'low' ? 1200 : mob ? 1800 : this.quality === 'high' ? 9000 : 3000) : 0;
     for (const st of ['glass', 'office', 'res']) {
       const tex = this.makeFacade(st, night);
       const band = this.makeStreetBand(st);
@@ -1844,7 +1845,7 @@ export class Environment {
 
   /* ---------- baked city shadows ---------- */
   initCityShadows() {
-    const city = this.hf.city, S = city && city.real && this.quality !== 'low' ? 2048 : 1024;
+    const city = this.hf.city, S = city && city.real && this.quality !== 'low' && this.quality !== 'mobile' ? 2048 : 1024;
     const c = document.createElement('canvas'); c.width = c.height = S;
     const tex = new THREE.CanvasTexture(c);
     tex.magFilter = THREE.LinearFilter; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.generateMipmaps = true;
@@ -2009,7 +2010,7 @@ export class Environment {
   /* ---------- trees ---------- */
   buildTrees() {
     const hf = this.hf;
-    const count = this.quality === 'high' ? 26000 : 11000;
+    const count = this.quality === 'high' ? 26000 : this.quality === 'mobile' ? 6500 : 11000;
     const t = this.map.trees;
     // conifers are open cones; broadleaf / scrub are low-poly blobs lifted onto a short trunk height
     const geo = t.shape === 'cone' ? new THREE.ConeGeometry(1, 1, 5, 1, true) : new THREE.IcosahedronGeometry(0.5, 0);
