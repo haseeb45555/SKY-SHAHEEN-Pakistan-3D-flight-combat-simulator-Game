@@ -78,7 +78,8 @@ export class Game {
     this.threats = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
     this.hs = this.makeHudState();
     this.as = {};                 // audio state (reused)
-    this.frameMs = 16; this.resT = 0;
+    this.frameMs = 16; this.resT = 0; this.resHold = 0; this.slowRuns = 0;
+    this.autoCap30 = false; this._acc = 0;
 
     engine.onResize(() => this.hud.resize());
     this.onHit = this.onHit.bind(this);
@@ -159,9 +160,7 @@ export class Game {
   ensureEnv(map) {
     const s = this.settings;
     let q = s.get('quality');
-    // Mobile auto quality starts sharper, then dynamically scales render resolution
-    // if the GPU needs help to keep the frame rate smooth.
-    this.autoRes = q === 'auto' || q === 'mobile';
+    this.autoRes = q === 'auto';
     if (q === 'auto') q = this.ui && this.ui.isTouch ? 'mobile' : 'med';
     const tod = s.get('tod'), envKey = this.envKey(map);
     map = map || s.get('map');
@@ -575,10 +574,20 @@ export class Game {
   loop() {
     requestAnimationFrame(this.loop);
     const now = performance.now();
-    const raw = (now - this.lastTime) / 1000;
+    let raw = (now - this.lastTime) / 1000;
+    // FRAME RATE: 30 fps = skip every other display frame and spend the saved GPU time on sharper pixels.
+    // Chosen in the menu (FRAME RATE), or switched on by itself on a phone that cannot hold 60 even at
+    // the lowest resolution (auto only). The hangar menu on a phone always runs at 30 (cool + battery).
+    const inMenu = this.state === 'menu' || !this.player;
+    const fps = this.settings.get('fps');
+    const cap30 = inMenu ? this.engine.isTouch : (fps === 30 || (fps === 'auto' && this.autoCap30));
+    if (cap30) {
+      if (raw < 1 / 30 - 0.0035) return;       // too early: leave lastTime alone so the gap accumulates
+    }
     this.lastTime = now;
     const dt = Math.min(raw, 0.05);
-    if (this.state === 'menu' || !this.player) {
+    this.cap30 = cap30;
+    if (inMenu) {
       if (this.show) { this.updateShowcase(dt); this.engine.render(dt); }
       return;
     }
@@ -589,19 +598,39 @@ export class Game {
     this.engine.render(dt);
   }
 
-  /** Quality "auto": trade resolution for frame rate. */
+  /** Quality "auto": trade resolution for frame rate (phones start sharp at 1.5x and settle on what holds 60,
+   *  or 30 fps when the phone cannot do 60). frameMs is the real time between frames, so on a 60 Hz screen
+   *  it can never be much below 16.7 ms: "fast" therefore means "locked at the target", not "faster". */
   adaptResolution(raw) {
     if (!this.autoRes || raw > 0.25) return;
-    this.frameMs += (raw * 1000 - this.frameMs) * 0.05;
+    const eng = this.engine, r = eng.renderer;
+    const budget = this.cap30 ? 33.3 : 16.7;              // ms per frame we are aiming for
+    this.frameMs += (raw * 1000 - this.frameMs) * 0.08;
     this.resT += raw;
-    if (this.resT < 1.5) return;
+    if (this.resT < 1.2) return;
     this.resT = 0;
-    const r = this.engine.renderer, dpr = window.devicePixelRatio || 1;
-    const cur = r.getPixelRatio();
+    const cur = r.getPixelRatio(), lo = eng.prMin, hi = eng.prMax;
+    const slow = this.frameMs > budget * 1.28, fast = this.frameMs < budget * 1.06;
     let next = cur;
-    if (this.frameMs > 22) next = Math.max(0.65, cur * 0.85);
-    else if (this.frameMs < 16.5) next = Math.min(Math.min(dpr, this.ui && this.ui.isTouch ? 1.5 : 2), cur * 1.06);
-    if (Math.abs(next - cur) > 0.02) { r.setPixelRatio(next); this.engine.resize(); }
+    if (slow) {
+      this.resHold = 4;                                   // after a drop wait ~5 s before trying to climb again
+      // pixels cost ~ ratio^2: jump straight to the ratio that fits the budget (not below 80 % in one step)
+      next = Math.max(lo, cur * Math.max(0.8, Math.sqrt(budget * 1.05 / this.frameMs)));
+      if (cur <= lo + 0.02) {                             // already at the floor and still slow
+        if (++this.slowRuns >= 3 && !this.cap30 && eng.isTouch && this.settings.get('fps') === 'auto') {
+          this.autoCap30 = true; this.slowRuns = 0;       // phone cannot do 60: run a steady 30 instead
+          next = Math.min(hi, Math.max(cur, 1.25)); this.frameMs = 33.3;
+        }
+      } else this.slowRuns = 0;
+    } else {
+      this.slowRuns = 0;
+      if (this.resHold > 0) this.resHold--;
+      else if (fast) next = Math.min(hi, cur * 1.07);
+    }
+    if (Math.abs(next - cur) > 0.02) {
+      r.setPixelRatio(next); eng.resize();
+      this.frameMs = budget;                              // measure the new size from a clean start
+    }
   }
 
   update(dt) {
