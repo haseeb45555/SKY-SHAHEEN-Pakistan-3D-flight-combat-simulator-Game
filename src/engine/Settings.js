@@ -9,6 +9,7 @@ export const OPTIONS = {
   tod: { label: 'TIME', values: ['day', 'dawn', 'sunset', 'night', 'overcast'], names: ['CLEAR DAY', 'GOLDEN HOUR', 'SUNSET', 'MOONLIT', 'OVERCAST'] },
   difficulty: { label: 'ENEMY', values: ['easy', 'normal', 'hard'], names: ['ROOKIE', 'VETERAN', 'ACE'] },
   assist: { label: 'ASSIST', values: [true, false], names: ['ON', 'OFF (RAW)'] },
+  fps: { label: 'FRAME RATE', values: ['auto', 60, 30], names: ['AUTO', '60 FPS', '30 FPS · SMOOTH + COOL'] },
   quality: { label: 'GRAPHICS', values: ['auto', 'low', 'med', 'high'], names: ['AUTO', 'LOW', 'MEDIUM', 'HIGH'] },
   sensitivity: { label: 'STICK', values: [0.7, 1, 1.4], names: ['SOFT', 'NORMAL', 'SHARP'] },
   invertY: { label: 'PULL', values: [false, true], names: ['DOWN = NOSE UP', 'UP = NOSE UP'] },
@@ -21,7 +22,7 @@ export const OPTIONS = {
 
 const DEFAULTS = {
   aircraft: 'jf17', mission: 'free', map: 'pakistan', start: 'valhall',
-  tod: 'day', difficulty: 'normal', assist: true, quality: 'auto',
+  tod: 'day', difficulty: 'normal', assist: true, quality: 'auto', fps: 'auto',
   sensitivity: 1, invertY: false, tilt: false, sound: 1, haptics: true, units: 'full', wingman: false,
   helpSeen: false,          // the HOW TO FLY screen pops up by itself only until it has been closed once
   best: {},
