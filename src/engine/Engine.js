@@ -9,7 +9,7 @@ export class Engine {
   constructor(canvas) {
     this.canvas = canvas;
     this.renderer = new THREE.WebGLRenderer({
-      canvas, antialias: false, powerPreference: 'high-performance',
+      canvas, antialias: true, powerPreference: 'high-performance',
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -38,7 +38,7 @@ export class Engine {
     const dpr = window.devicePixelRatio || 1;
     let pixelRatio = Math.min(dpr, 2);
     let shadows = false;
-    if (q === 'mobile') { pixelRatio = Math.min(dpr, 1.15); shadows = false; }
+    if (q === 'mobile') { pixelRatio = Math.min(dpr, 1.5); shadows = false; }
     else if (q === 'low') { pixelRatio = Math.min(dpr, 1); shadows = false; }
     else if (q === 'high') { pixelRatio = Math.min(dpr, 2.5); shadows = true; }
     this.renderer.setPixelRatio(pixelRatio);
