@@ -1,0 +1,798 @@
+// UI.js — menus (hangar, pause, debrief), toasts, and all input:
+// keyboard, mouse, touch (floating stick / throttle / buttons / drag-to-look) and gamepad.
+// The in-flight symbology is NOT here — that is the canvas HUD (ui/Hud.js).
+import { clamp } from '../engine/utils.js';
+import { AIRCRAFT_SPECS, PLAYABLE } from '../aircraft/AircraftSpecs.js';
+import { MISSIONS, MISSION_ORDER, missionBlurb, bestKey } from '../engine/Missions.js';
+import { loadRun } from '../engine/AirRace.js';
+
+const SHARE_URL = 'https://mrober01.github.io/ShaheenWings/';
+import { getMap } from '../world/Maps.js';
+import { MAP_THUMBS } from './mapThumbs.js';
+import { OPTIONS } from '../engine/Settings.js';
+import { AB_DETENT } from '../engine/FlightModel.js';
+import { AP_MODES } from '../engine/Autopilot.js';
+import { RadarScope } from './RadarScope.js';
+import { MenuMusic } from '../engine/MenuMusic.js';
+
+const MENU_OPTIONS = ['map', 'start', 'tod', 'difficulty', 'wingman', 'assist', 'quality', 'sensitivity', 'invertY', 'tilt', 'sound', 'haptics'];
+const STICK_R = 58;
+const expo = (v) => v * (0.4 + 0.6 * v * v);
+
+export class UI {
+  constructor(game, settings, audio) {
+    this.game = game; this.settings = settings; this.audio = audio;
+    this.menuMusic = new MenuMusic();
+    this.keys = {};
+    this.isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    this.touchActive = false;         // touch controls on screen (read by the HUD layout)
+    this.stick = { x: 0, y: 0, on: false };
+    this.mouse = { dx: 0, dy: 0, fire: false, locked: false };
+    this.lookD = { dx: 0, dy: 0 };
+    this._look = { dx: 0, dy: 0 };
+    this.throttle = 0;
+    this.touchFire = false; this.touchBrake = false;
+    this.pad = { fire: false, brake: false, prev: [] };
+    this.input = { pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: false, fire: false };
+    this.aircraft = PLAYABLE.includes(settings.get('aircraft')) ? settings.get('aircraft') : 'jf17';
+    this.mission = MISSIONS[settings.get('mission')] ? settings.get('mission') : 'free';
+
+    this.initMenus();
+    this.initKeyboardMouse();
+    this.initTouch();
+    audio.setVolume(settings.get('sound'));
+    settings.onChange((k, v) => { if (k === 'sound') { audio.setVolume(v); this.menuMusic.setVolume(v); } });
+    this.menuMusic.setVolume(settings.get('sound'));
+  }
+
+  $(id) { return document.getElementById(id); }
+
+  /* ================================================================ menus */
+
+  initMenus() {
+    const mk = (parent, cls, html, fn) => {
+      const el = document.createElement('button');
+      el.className = cls; el.innerHTML = html;
+      el.addEventListener('click', () => { this.audio.unlock(); this.menuMusic.unlock(); this.audio.play('click'); fn(el); });
+      parent.appendChild(el);
+      return el;
+    };
+
+    this.aircraftCards = {};
+    for (const key of PLAYABLE) {
+      const s = AIRCRAFT_SPECS[key], st = s.stats || {};
+      const code = ({ f16: 'PK', jf17: 'PK', j10c: 'PK', c130: 'PK', a10: 'US', c172: 'US', mig29: 'RU', su35: 'RU', mi24: 'RU', spitfire: 'GB' })[key] || '--';
+      // five-segment meter: a segment lights for every 20 points
+      const bar = (n, v) => `<span class="stat"><i>${n}</i><span class="seg">${[1, 2, 3, 4, 5].map((q) => `<u${(v || 0) >= q * 20 - 10 ? ' class="on"' : ''}></u>`).join('')}</span></span>`;
+      this.aircraftCards[key] = mk(this.$('aircraft-cards'), 'card',
+        `<span class="nation" data-nation="${code}">${code}</span><div class="id"><h3>${s.short || s.name}</h3><div class="sub">${s.name}</div><div class="sub dim">${s.role}</div></div>` +
+        `<div class="stats">${bar('SPD', st.speed)}${bar('AGI', st.agility)}${bar('ARM', st.armor)}${bar('PWR', st.firepower)}</div>`,
+        () => this.selectAircraft(key));
+    }
+    this.missionCards = {};
+    for (const key of MISSION_ORDER) {
+      const m = MISSIONS[key];
+      this.missionCards[key] = mk(this.$('mission-cards'), 'card',
+        `<div class="id"><h3>${m.title}</h3><div class="sub" data-blurb="${key}"></div></div><div class="best" data-best="${key}"></div>`,
+        () => this.selectMission(key));
+    }
+    this.optPaint = {};
+    for (const k of MENU_OPTIONS) {
+      if (k === 'tilt' && !this.isTouch) continue;
+      const el = mk(this.$('options'), 'opt', '', () => {
+        this.settings.cycle(k); paint(); this.refreshBest();
+        if (k === 'map') { this.optPaint.start(); this.refreshBlurbs(); }
+        // the label changes at once; the backdrop world follows once the clicking stops
+        if (k === 'tod' || k === 'quality' || k === 'map') this.queueBackdrop();
+        this.paintBrief();
+      });
+      // MAP also shows a top-down picture of the map, which changes the instant you click
+      const thumb = () => (k === 'map' && MAP_THUMBS[this.settings.get('map')] ? `<img class="thumb" alt="" src="${MAP_THUMBS[this.settings.get('map')]}">` : '');
+      const paint = () => { el.innerHTML = `${thumb()}<i>${OPTIONS[k].label}</i><b>${this.optName(k)}</b>`; el.classList.toggle('has-thumb', k === 'map'); };
+      paint.el = el;
+      paint();
+      this.optPaint[k] = paint;
+      if (k === 'start') this.startOpt = el;
+    }
+    this.selectAircraft(this.aircraft);
+    this.selectMission(this.mission);
+    this.refreshBlurbs();
+    this.initTabs();
+    this.paintBrief();
+    // live radar scopes behind the hangar, pause and debrief screens (they run only while visible)
+    this.radars = [
+      new RadarScope(this.$('menu-radar'), { cx: 0.7, cy: 0.5, strength: 1 }),
+      new RadarScope(this.$('pause-radar'), { cx: 0.68, cy: 0.5, strength: 0.85, fps: 24 }),
+      new RadarScope(this.$('end-radar'), { cx: 0.68, cy: 0.5, strength: 0.85, fps: 24 }),
+    ];
+
+    this.$('menu-help').innerHTML = this.isTouch
+      ? `<b>Left thumb</b> flies (pull down = nose up) · <b>right slider</b> is the throttle, top = afterburner · drag the sky to look around · ` +
+        `<b>TGT</b> picks a target, hold it in front until the diamond closes, then <b>MSL</b> · stop on a runway to rearm · ` +
+        `<b>LATCH</b> + <b>MSL</b> = missile motor stays on the rail as a rocket boost · <b>hold LATCH</b> (latches locked) = override the motor burn limiter: long burns, scorched wing, enough to reach space · <b>EJECT</b> twice to bail out · <b>ASST</b> (top) = assist on/off · <b>AUTO</b> = autopilot (take off, land, space, landmark, target, hold; drag anywhere to look around while it flies, AUTO → OFF to take over) · <b>HOOK</b> for carrier traps · <b>MTR</b> = motors on/off (latches locked; wingtip RCS steers you in space)`
+      : `<b>W/S</b> pitch · <b>A/D</b> roll · <b>Q/E</b> rudder · <b>Shift/Ctrl</b> throttle (1-5 presets, 5 = afterburner) · <b>Space</b> gun · ` +
+        `<b>X</b> missile · <b>F</b> flares · <b>T</b> target · <b>G</b> gear · <b>B</b> brake · <b>V</b> view (wheel = camera distance) · <b>I</b> hide HUD · <b>C</b> (hold) look at panel · <b>N</b> nav · <b>H</b> lock pylon latches (then <b>X</b> = rocket boost) · <b>hold H</b> = burn-limiter override (long burns, enough to reach space) · <b>J J</b> eject · <b>K</b> tail hook · <b>L</b> assist on/off · <b>O</b> autopilot (then 1-6; the mouse looks around while it flies, W/A/S/D take over) · <b>Y</b> wingman (call two wingmen; fly as a three-ship formation) · <b>U</b> motor cut-off / relight (latches locked; also arms the wingtip RCS thrusters for steering in space) · right-drag look · <b>Esc</b> pause · gamepad supported`;
+
+    const on = (id, fn) => this.$(id).addEventListener('click', () => { this.audio.unlock(); this.menuMusic.unlock(); this.audio.play('click'); fn(); });
+    on('btn-fly', () => this.fly());
+    on('btn-resume', () => this.resume());
+    on('btn-help', () => this.showHelp(true));
+    on('btn-help-pause', () => this.showHelp(true));
+    on('btn-help-close', () => this.showHelp(false));
+    // ASSIST in flight (pause menu): the flight-model helpers plus, in the air race, gate assist and Auto-GCAS
+    on('btn-assist', () => this.toggleAssist(false));
+    on('btn-asst', () => { this.toggleAssist(true); this.$('btn-asst').blur(); });   // blur: SPACE (guns) must not click it again
+    on('btn-restart', () => this.fly());
+    on('btn-hangar', () => this.toMenu());
+    on('btn-end-restart', () => this.fly());
+    on('btn-end-hangar', () => this.toMenu());
+    on('btn-end-share', () => this.shareResult());
+    // Chrome's install offer (https site only, see main.js initApp): a button in the hangar instead of the mini bar
+    window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); this._install = e; this.show('btn-install', true); });
+    window.addEventListener('appinstalled', () => { this._install = null; this.show('btn-install', false); this.toast('INSTALLED · OPEN SHAHEEN FROM THE HOME SCREEN', 'good'); });
+    on('btn-install', async () => {
+      const e = this._install; if (!e) return;
+      this._install = null; this.show('btn-install', false);
+      try { await e.prompt(); } catch { /* dismissed */ }
+    });
+    on('btn-pause', () => this.pauseGame());
+    // autopilot picker: click / tap a mode
+    for (const b of document.querySelectorAll('#ap-panel button')) {
+      const pick = (e) => { e.preventDefault(); e.stopPropagation(); this.pickAP(b.dataset.ap); };
+      b.addEventListener('click', pick);
+      b.addEventListener('touchstart', pick, { passive: false });
+    }
+    for (const b of document.querySelectorAll('#wing-panel button')) {
+      const pick = (e) => { e.preventDefault(); e.stopPropagation(); this.pickWing(b.dataset.wing); };
+      b.addEventListener('click', pick);
+      b.addEventListener('touchstart', pick, { passive: false });
+    }
+    document.addEventListener('visibilitychange', () => { if (document.hidden) this.pauseGame(); });
+  }
+
+  selectAircraft(key) {
+    this.aircraft = key; this.settings.set('aircraft', key);
+    for (const [k, c] of Object.entries(this.aircraftCards)) c.classList.toggle('selected', k === key);
+    if (this.game.state === 'menu' && this._menuUp) this.game.showcase(key);
+    this.refreshBest();   // the air race keeps a best per aircraft
+    this.paintBrief();
+  }
+
+  selectMission(key) {
+    this.mission = key; this.settings.set('mission', key);
+    for (const [k, c] of Object.entries(this.missionCards)) c.classList.toggle('selected', k === key);
+    if (this.startOpt) this.startOpt.classList.toggle('hidden', key !== 'free');
+    this.refreshBest();
+    this.paintBrief();
+  }
+
+  /** Aircraft / Mission / Setup tabs in the hangar. */
+  initTabs() {
+    const tabs = document.querySelectorAll('#menu .tab');
+    for (const t of tabs) {
+      t.addEventListener('click', () => {
+        this.audio.unlock(); this.audio.play('click');
+        for (const o of tabs) { const on = o === t; o.classList.toggle('on', on); o.setAttribute('aria-selected', on ? 'true' : 'false'); }
+        for (const p of document.querySelectorAll('#menu .pane')) p.classList.toggle('on', p.id === 'pane-' + t.dataset.pane);
+      });
+    }
+  }
+
+  /** The sortie summary next to the launch button: what you are about to fly, and where. */
+  paintBrief() {
+    if (!this.$('brief-ac')) return;
+    const spec = AIRCRAFT_SPECS[this.aircraft];
+    this.$('brief-ac').textContent = spec ? (spec.short || spec.name) : this.aircraft;
+    this.$('brief-ms').textContent = MISSIONS[this.mission] ? MISSIONS[this.mission].title : this.mission;
+    this.$('brief-map').textContent = this.settings.name('map');
+  }
+
+  /** Option label; the free-flight start names the current map's airfields / city. */
+  optName(k) {
+    if (k !== 'start') return this.settings.name(k);
+    const m = getMap(this.settings.get('map'));
+    const i = OPTIONS.start.values.indexOf(this.settings.get('start'));
+    if (i === 4 || (i === 0 && m.carrierHome)) return `CARRIER · ${m.carrier || 'CVN-77 VALIANT'}`;
+    return i === 3 ? `AIRBORNE · OVER ${m.city}` : m.fields[Math.max(0, i)];
+  }
+
+  refreshBlurbs() {
+    for (const el of document.querySelectorAll('[data-blurb]')) el.textContent = missionBlurb(el.dataset.blurb, this.settings.get('map'));
+  }
+
+  refreshBest() {
+    for (const el of document.querySelectorAll('[data-best]')) {
+      const b = this.settings.best(bestKey(el.dataset.best, this.settings.get('map'), this.aircraft));
+      el.textContent = b ? `BEST ${b}` : '';
+      if (el.dataset.best === 'race') {
+        // the air race: best time and medal for this map + aircraft + difficulty
+        const run = loadRun(`${this.settings.get('map')}:${this.aircraft}:${this.settings.get('difficulty')}`);
+        if (run && run.total) {
+          const d = Math.round(run.total * 10), tm = `${Math.floor(d / 600)}:${((d % 600) / 10).toFixed(1).padStart(4, '0')}`;
+          el.textContent = `BEST ${tm}${run.medal ? ' · ' + run.medal : ''}${b ? ` · ${b} PTS` : ''}`;
+        }
+      }
+    }
+  }
+
+  show(id, on) { this.$(id).classList.toggle('hidden', !on); }
+
+  /** HOW TO FLY: the basics for this device (touch or keyboard), the full control list folded away below.
+   *  Pops up by itself on the first visit (Settings helpSeen, kept in the browser), then only from its buttons. */
+  showHelp(on) {
+    if (on) {
+      const t = this.isTouch, li = (a) => `<ul>${a.map(x => `<li>${x}</li>`).join('')}</ul>`;
+      this.$('help-body').innerHTML =
+        `<h2>The basics</h2>` + li(t ? [
+          '<b>Left thumb</b> flies: pull down = nose up, push up = nose down, sideways = roll',
+          '<b>Right slider</b> is the throttle (top = afterburner)',
+          'Hold <b>GUN</b> to fire · <b>TGT</b> picks a target, then <b>MSL</b> fires a missile',
+          'Drag the sky to look around · the <b>pause</b> button (top right) pauses',
+          'Or lean the phone: Setup tab → <b>Tilt to fly</b> (tip the top edge toward you to climb)',
+        ] : [
+          '<b>W / S</b> pitch (S = nose up) · <b>A / D</b> roll · <b>Q / E</b> rudder · or click and fly with the <b>mouse</b>',
+          '<b>Shift / Ctrl</b> throttle (<b>1-5</b> presets, 5 = afterburner)',
+          '<b>Space</b> fires the gun · <b>T</b> picks a target, <b>X</b> fires a missile',
+          '<b>V</b> changes the view · right-drag looks around · <b>Esc</b> pauses · gamepads work too',
+        ]) +
+        `<h2>Start easy</h2>` + li([
+          'Pick <b>FREE FLIGHT</b> or <b>AIR RACE</b>, enemy <b>Rookie</b>, then <b>SCRAMBLE</b>',
+          `<b>${t ? 'ASST' : 'ASSIST'}</b> on (lit) keeps you from stalling and, in the air race, helps line you up with the gates${t ? '' : ' (<b>L</b> key)'}`,
+          `Rather not take off yourself? <b>${t ? 'AUTO' : 'O'}</b> → TAKE OFF, then take over`,
+        ]) +
+        `<h2>Air race</h2>` + li([
+          'Fly the gates in order, against the clock: <b>blue</b> = wings level, <b>red</b> = knife-edge (tip the plane on its side)',
+          'Shoot the balloons on the way: gold ones take a second off your time · race your best run\'s ghost next time',
+        ]) +
+        `<details><summary>All controls ▸</summary><p class="help-more">${this.$('menu-help').innerHTML}</p></details>`;
+    } else if (!this.settings.get('helpSeen')) this.settings.set('helpSeen', true);
+    this.show('help', on);
+  }
+
+  showMenu() {
+    this.menuMusic.play('menu');
+    this.show('menu', true); this.show('pause', false); this.show('endscreen', false);
+    if (!this.settings.get('helpSeen') && !this._helpAuto) { this._helpAuto = true; this.showHelp(true); }
+    this.setFlightUi(false);
+    this.refreshBest();
+    this._menuUp = true;
+    // the menu is usable straight away; the 3D backdrop (a whole world to build) comes a frame later
+    this.queueBackdrop(0);
+  }
+
+  /**
+   * Rebuild the menu backdrop for the current map / time / graphics settings, `delay` ms after the
+   * last request — clicking through the maps stays instant and only the one you stop on is built.
+   * While a new world is pending the MAP option reads LOADING (painted before the build blocks).
+   */
+  queueBackdrop(delay = 350) {
+    clearTimeout(this._backdropT);
+    const busy = this.game.needsEnv() && this.optPaint.map;
+    if (busy) this.setMapBusy(true);
+    this._backdropT = setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+      this._backdropT = null;
+      if (this._menuUp && this.game.state === 'menu') this.game.showcase(this.aircraft);
+      this.setMapBusy(false);
+    })), delay);
+  }
+
+  setMapBusy(on) {
+    const el = this.optPaint.map && this.optPaint.map.el;
+    if (el) el.classList.toggle('busy', on);
+  }
+
+  hideMenu() { this.show('menu', false); }
+
+  fly() {
+    this.menuMusic.stop();
+    this.audio.unlock();
+    this.show('menu', false); this.show('pause', false); this.show('endscreen', false);
+    this.goImmersive();
+    if (this.isTouch && this.settings.get('tilt')) this.initTilt();
+    this.calibrateTilt();
+    this.checkTilt();
+    this._menuUp = false;
+    clearTimeout(this._backdropT); this._backdropT = null; this.setMapBusy(false);
+    if (!this.game.needsEnv()) { this.game.startMission(this.mission, this.aircraft); return; }
+    // a different world: show the loading screen, let it paint, build, and keep it up through the
+    // first frame (where the GPU uploads textures) so the player never sees a frozen menu
+    if (this._loadingWorld) return;
+    this._loadingWorld = true;
+    const scr = document.getElementById('loading'), msg = document.getElementById('loading-msg');
+    if (msg) msg.textContent = `Loading ${getMap(this.settings.get('map')).name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())}…`;
+    if (scr) scr.classList.remove('hidden');
+    const frame = (fn) => requestAnimationFrame(() => requestAnimationFrame(fn));
+    frame(() => {
+      try { this.game.startMission(this.mission, this.aircraft); }
+      finally { frame(() => { if (scr) scr.classList.add('hidden'); this._loadingWorld = false; }); }
+    });
+  }
+
+  /** Fullscreen + landscape + keep the screen awake (phones). Every call is best-effort. */
+  goImmersive() {
+    if (!this.isTouch) return;
+    try {
+      const el = document.documentElement;
+      if (!document.fullscreenElement && el.requestFullscreen) {
+        el.requestFullscreen({ navigationUI: 'hide' }).then(() => {
+          if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+        }).catch(() => {});
+      }
+      if (navigator.wakeLock && !this._wake) {
+        navigator.wakeLock.request('screen').then(w => { this._wake = w; w.addEventListener('release', () => { this._wake = null; }); }).catch(() => {});
+      }
+    } catch { /* not allowed here */ }
+  }
+
+  onGameStart(player) {
+    this.throttle = player.fm.throttle;
+    this.stick.on = false; this.stick.x = 0; this.stick.y = 0;
+    this.touchFire = false; this.touchBrake = false;
+    this.lookD.dx = 0; this.lookD.dy = 0;
+    this.setFlightUi(true);
+    this.paintThrottle();
+    const s = player.spec;
+    this.show('btn-msl', s.missileCount > 0); this.show('btn-fire', s.gunAmmo > 0);
+    this.show('btn-flare', s.flares > 0); this.show('btn-gear', s.gearH > 0);
+    this.show('btn-latch', s.missileCount > 0); this.show('btn-eject', s.cockpit !== 'airliner');
+    this.show('btn-mtr', s.missileCount > 0); this.show('btn-hook', s.type !== 'heli');
+  }
+
+  /** Open / close the wingman command picker. */
+  toggleWing(open = !this.wingOpen) {
+    if (open && this.game.state !== 'playing') return;
+    if (open) this.toggleAP(false);
+    this.wingOpen = open;
+    this.show('wing-panel', open);
+    if (open) {
+      if (document.exitPointerLock && this.mouse.locked) document.exitPointerLock();
+      const w = this.game.wingman, on = w.active;
+      for (const b of document.querySelectorAll('#wing-panel button')) {
+        const c = b.dataset.wing;
+        if (c === 'toggle') b.lastChild.textContent = on ? 'DISMISS WINGMAN 1' : 'CALL WINGMAN 1';
+        if (c === 'call2') b.lastChild.textContent = this.game.wingman2.active ? 'DISMISS WINGMAN 2' : 'CALL WINGMAN 2';
+        if (c === 'smoke') b.lastChild.textContent = w.smoke ? 'SMOKE OFF' : 'SMOKE ON';
+        b.classList.toggle('dim', !on && !['toggle', 'call2', 'close'].includes(c));
+      }
+    }
+  }
+
+  pickWing(cmd) {
+    this.toggleWing(false);
+    if (cmd === 'call2') { this.game.wingman2.active ? this.game.wingman2.dismiss() : this.game.wingman2.spawn(); return; }
+    if (cmd !== 'close') this.game.wingman.command(cmd);
+  }
+
+  /** Open / close the autopilot mode picker. */
+  toggleAP(open = !this.apOpen) {
+    if (open && this.game.state !== 'playing') return;
+    if (open) this.toggleWing(false);
+    this.apOpen = open;
+    this.show('ap-panel', open);
+    if (open) {
+      if (document.exitPointerLock && this.mouse.locked) document.exitPointerLock();
+      const cur = this.game.ap ? this.game.ap.mode : null;
+      for (const b of document.querySelectorAll('#ap-panel button')) b.classList.toggle('on', b.dataset.ap === cur);
+    }
+  }
+
+  apLamp(on) { this.$('btn-auto').classList.toggle('on', on); }
+
+  pickAP(mode) {
+    this.toggleAP(false);
+    this.game.setAP(mode);
+  }
+
+  setFlightUi(on) {
+    if (!on) { this.toggleAP(false); this.toggleWing(false); }
+    this.touchActive = on && this.isTouch;
+    this.show('touch-ui', this.touchActive);
+    this.show('btn-pause', on);
+    this.show('btn-asst', on); this.paintAssistBtn();
+  }
+
+  togglePause() {
+    if (this.game.state === 'playing') this.pauseGame();
+    else if (this.game.state === 'paused') this.resume();
+  }
+
+  pauseGame() {
+    const g = this.game;
+    if (g.state !== 'playing') return;
+    g.pause();
+    this.setFlightUi(false);
+    const kv = (k, v) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
+    this.$('pause-stats').innerHTML = kv('Mission', MISSIONS[g.mode].title) + kv('Score', g.score) + kv('Kills', g.kills) + (g.wave ? kv('Wave', g.wave) : '');
+    this.paintAssistBtn();
+    this.show('pause', true);
+    this.menuMusic.play('pause');
+    if (document.exitPointerLock) document.exitPointerLock();
+  }
+
+  /** ASSIST on/off in flight (ASST button, L key, pause menu): the flight-model helpers (holds the flight path,
+   *  no stalls) plus, in the air race, gate assist and Auto-GCAS. */
+  toggleAssist(say = true) {
+    this.settings.cycle('assist');
+    const on = !!this.settings.get('assist'), p = this.game.player;
+    if (p) p.fm.assist = on;
+    this.paintAssistBtn(); if (this.optPaint.assist) this.optPaint.assist();
+    if (say) this.toast(on ? 'ASSIST ON' : 'ASSIST OFF · RAW', on ? 'good' : 'warn');
+  }
+
+  paintAssistBtn() {
+    const lbl = this.$('btn-assist').querySelector('span');
+    if (lbl) lbl.textContent = `Assist: ${this.optName('assist')}`;
+    this.$('btn-asst').classList.toggle('on', !!this.settings.get('assist'));
+  }
+
+  resume() { this.menuMusic.stop(); this.show('pause', false); this.setFlightUi(true); this.calibrateTilt(); this.checkTilt(); this.game.resume(); }
+
+  toMenu() { this.game.toMenu(); this.showMenu(); }
+
+  showDebrief(r) {
+    this.menuMusic.stop();
+    this.setFlightUi(false);
+    if (document.exitPointerLock) document.exitPointerLock();
+    const t = this.$('end-title');
+    t.textContent = r.title; t.className = r.won ? 'won' : 'lost';
+    const kv = (k, v) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
+    this.$('end-stats').innerHTML =
+      (r.detail ? `<p class="detail">${r.detail}</p>` : '') +
+      kv('Score', r.score) + kv('Kills', r.kills) + (r.wave ? kv('Wave', r.wave) : '') +
+      (r.newBest ? '<div class="kv newbest"><span>Record</span><b>New best</b></div>' : r.best ? kv('Best', r.best) : '');
+    this._share = r.share || '';
+    this.show('btn-end-share', !!this._share);
+    this.show('endscreen', true);
+  }
+
+  /** Air race: share the time (phone share sheet → Facebook, messages…; else copy to the clipboard). */
+  async shareResult() {
+    const text = this._share, url = SHARE_URL;
+    if (!text) return;
+    try {
+      if (navigator.share) { await navigator.share({ title: 'Sky Shaheen Air Race', text, url }); return; }
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(`${text} ${url}`); this.toast('COPIED · PASTE IT INTO A POST', 'good'); }
+    catch { this.toast('COULD NOT SHARE', 'warn'); }
+  }
+
+  toast(msg, kind = '', ms = 2600) {
+    const t = this.$('toast');
+    t.textContent = msg; t.className = 'show ' + kind;
+    clearTimeout(this._toastT);
+    this._toastT = setTimeout(() => { t.className = kind; }, ms);
+  }
+
+  damageFlash() {
+    const v = this.$('damage-vignette');
+    v.style.opacity = 1;
+    clearTimeout(this._dmgT);
+    this._dmgT = setTimeout(() => { v.style.opacity = 0; }, 160);
+  }
+
+  /* ================================================================ keyboard + mouse */
+
+  initKeyboardMouse() {
+    document.addEventListener('keydown', (e) => {
+      if (e.repeat) return;
+      this.keys[e.code] = true;
+      const g = this.game;
+      if (e.code === 'Escape' && !this.$('help').classList.contains('hidden')) { this.showHelp(false); return; }
+      if (e.code === 'Escape' || e.code === 'KeyP') { this.togglePause(); return; }
+      if (e.code === 'Enter' && g.state === 'menu') { this.fly(); return; }
+      if (g.state !== 'playing') return;
+      // autopilot picker open: 0-6 choose a mode (and do not move the throttle)
+      if (this.apOpen && /^(Digit|Numpad)[0-6]$/.test(e.code)) {
+        const n = +e.code.slice(-1);
+        this.pickAP(n === 0 ? 'off' : AP_MODES[n - 1]);
+        this.keys[e.code] = false;
+        return;
+      }
+      // wingman picker open: 1-2 call/dismiss wingmen, 3-8 commands, 0 closes
+      if (this.wingOpen && /^(Digit|Numpad)[0-8]$/.test(e.code)) {
+        const n = +e.code.slice(-1);
+        const calls = ['toggle', 'call2', 'side', 'wave', 'inverted', 'barrel', 'roll', 'smoke'];
+        this.pickWing(n === 0 ? 'close' : calls[n - 1]);
+        this.keys[e.code] = false;
+        return;
+      }
+      switch (e.code) {
+        case 'KeyV': g.cycleView(); break;
+        case 'KeyI': g.toggleHud(); break;
+        case 'KeyG': g.toggleGear(); break;
+        case 'KeyF': g.dropFlare(); break;
+        case 'KeyX': g.fireMissile(); break;
+        case 'KeyT': case 'Tab': g.cycleTarget(); e.preventDefault(); break;
+        case 'KeyN': g.cycleNav(); break;
+        case 'KeyJ': g.eject(); break;
+        case 'KeyH': g.latchPress(); break;
+        case 'KeyK': g.toggleHook(); break;
+        case 'KeyU': g.toggleMotors(); break;
+        case 'KeyO': this.toggleAP(); break;
+        case 'KeyY': this.toggleWing(); break;
+        case 'KeyL': this.toggleAssist(); break;
+        case 'Space': e.preventDefault(); break;
+        default:
+      }
+    });
+    document.addEventListener('keyup', (e) => { this.keys[e.code] = false; if (e.code === 'KeyH') this.game.latchRelease(); });
+    window.addEventListener('blur', () => { this.keys = {}; this.mouse.fire = false; });
+
+    // click the view to capture the mouse as a stick; right-drag looks around
+    const canvas = this.$('hud-canvas');
+    let rdrag = false;
+    canvas.addEventListener('mousedown', (e) => {
+      if (this.game.state !== 'playing') return;
+      if (e.button === 2) { rdrag = true; return; }
+      if (e.button !== 0) return;
+      if (!this.mouse.locked && !this.isTouch && canvas.requestPointerLock) canvas.requestPointerLock();
+      else this.mouse.fire = true;
+    });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    // mouse wheel: camera distance in the outside views
+    canvas.addEventListener('wheel', (e) => {
+      if (this.game.state !== 'playing') return;
+      e.preventDefault();
+      this.game.cam.zoomBy(Math.sign(e.deltaY) * Math.min(3, Math.abs(e.deltaY) / 60 || 1));
+    }, { passive: false });
+    document.addEventListener('pointerlockchange', () => { this.mouse.locked = document.pointerLockElement === canvas; });
+    document.addEventListener('mousemove', (e) => {
+      if (rdrag) { this.lookD.dx += e.movementX; this.lookD.dy += e.movementY; }
+      // with the autopilot flying, the captured mouse looks around instead of flying
+      else if (this.mouse.locked && this.game.ap) { this.lookD.dx += e.movementX; this.lookD.dy += e.movementY; }
+      else if (this.mouse.locked) { this.mouse.dx += e.movementX; this.mouse.dy += e.movementY; }
+    });
+    document.addEventListener('mouseup', (e) => { if (e.button === 0) this.mouse.fire = false; if (e.button === 2) rdrag = false; });
+  }
+
+  /* ================================================================ touch */
+
+  initTouch() {
+    const game = this.game;
+    const opts = { passive: false };
+
+    // ---- floating stick: appears where the left thumb lands ----
+    const zone = this.$('stick-zone'), base = this.$('stick-base'), nub = this.$('stick-nub');
+    let sid = null, ox = 0, oy = 0, lookOnly = false, lx0 = 0, ly0 = 0;
+    const place = (x, y) => { base.style.left = x + 'px'; base.style.top = y + 'px'; };
+    const home = () => {
+      const r = zone.getBoundingClientRect();
+      place(r.left + Math.min(110, r.width / 2), r.bottom - 100);
+      nub.style.transform = 'translate(-50%,-50%)';
+      base.classList.remove('active');
+    };
+    this._stickHome = home;
+    zone.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      if (sid !== null) return;
+      const t = e.changedTouches[0];
+      sid = t.identifier; ox = t.clientX; oy = t.clientY;
+      // autopilot flying: the left thumb looks around like the rest of the screen (take over with AUTO → OFF)
+      lookOnly = !!this.game.ap; lx0 = ox; ly0 = oy;
+      if (lookOnly) return;
+      place(ox, oy); base.classList.add('active');
+      this.stick.on = true; this.stick.x = 0; this.stick.y = 0;
+    }, opts);
+    zone.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        if (t.identifier !== sid) continue;
+        if (lookOnly) { this.lookD.dx += t.clientX - lx0; this.lookD.dy += t.clientY - ly0; lx0 = t.clientX; ly0 = t.clientY; continue; }
+        let dx = t.clientX - ox, dy = t.clientY - oy;
+        const len = Math.hypot(dx, dy);
+        if (len > STICK_R) {
+          // the base trails the thumb so you never run out of travel
+          ox += dx * (1 - STICK_R / len); oy += dy * (1 - STICK_R / len);
+          place(ox, oy);
+          dx *= STICK_R / len; dy *= STICK_R / len;
+        }
+        this.stick.x = dx / STICK_R; this.stick.y = dy / STICK_R;
+        nub.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+      }
+    }, opts);
+    const endStick = (e) => {
+      for (const t of e.changedTouches) {
+        if (t.identifier !== sid) continue;
+        sid = null; this.stick.on = false; this.stick.x = 0; this.stick.y = 0;
+        if (!lookOnly) home();
+        lookOnly = false;
+      }
+    };
+    zone.addEventListener('touchend', endStick);
+    zone.addEventListener('touchcancel', endStick);
+
+    // ---- throttle slider (absolute) ----
+    const tz = this.$('throttle-zone'), track = this.$('throttle-track');
+    let tid = null;
+    const setThr = (y) => {
+      const r = track.getBoundingClientRect();
+      let v = 1 - clamp((y - r.top) / r.height, 0, 1);
+      // a little stickiness just below the afterburner detent
+      if (this.hasAB() && v > AB_DETENT - 0.05 && v <= AB_DETENT + 0.03) v = AB_DETENT - 0.01;
+      this.throttle = v;
+      this.paintThrottle();
+    };
+    tz.addEventListener('touchstart', (e) => { e.preventDefault(); const t = e.changedTouches[0]; tid = t.identifier; setThr(t.clientY); }, opts);
+    tz.addEventListener('touchmove', (e) => { e.preventDefault(); for (const t of e.changedTouches) if (t.identifier === tid) setThr(t.clientY); }, opts);
+    const endThr = (e) => { for (const t of e.changedTouches) if (t.identifier === tid) tid = null; };
+    tz.addEventListener('touchend', endThr); tz.addEventListener('touchcancel', endThr);
+
+    // ---- drag anywhere else to look around ----
+    const lz = this.$('look-zone');
+    let lid = null, lx = 0, ly = 0;
+    lz.addEventListener('touchstart', (e) => { e.preventDefault(); if (lid !== null) return; const t = e.changedTouches[0]; lid = t.identifier; lx = t.clientX; ly = t.clientY; }, opts);
+    lz.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        if (t.identifier !== lid) continue;
+        this.lookD.dx += t.clientX - lx; this.lookD.dy += t.clientY - ly;
+        lx = t.clientX; ly = t.clientY;
+      }
+    }, opts);
+    const endLook = (e) => { for (const t of e.changedTouches) if (t.identifier === lid) lid = null; };
+    lz.addEventListener('touchend', endLook); lz.addEventListener('touchcancel', endLook);
+
+    // ---- buttons ----
+    const tap = (id, fn) => this.$(id).addEventListener('touchstart', (e) => { e.preventDefault(); fn(); }, opts);
+    const hold = (id, set) => {
+      const el = this.$(id);
+      el.addEventListener('touchstart', (e) => { e.preventDefault(); set(true); el.classList.add('down'); }, opts);
+      const up = (e) => { e.preventDefault(); set(false); el.classList.remove('down'); };
+      el.addEventListener('touchend', up, opts); el.addEventListener('touchcancel', up, opts);
+    };
+    hold('btn-fire', (v) => { this.touchFire = v; });
+    hold('btn-brake', (v) => { this.touchBrake = v; });
+    tap('btn-msl', () => game.fireMissile());
+    tap('btn-flare', () => game.dropFlare());
+    tap('btn-tgt', () => game.cycleTarget());
+    tap('btn-gear', () => game.toggleGear());
+    tap('btn-view', () => game.cycleView());
+    tap('btn-nav', () => game.cycleNav());
+    tap('btn-eject', () => game.eject());
+    tap('btn-hook', () => game.toggleHook());
+    tap('btn-mtr', () => game.toggleMotors());
+    tap('btn-auto', () => this.toggleAP());
+    tap('btn-wing', () => this.toggleWing());
+    // LATCH: tap = pylon latches, hold ~1.5 s = lift the guard and override the motor burn limiter
+    hold('btn-latch', (v) => { if (v) game.latchPress(); else game.latchRelease(); });
+    window.addEventListener('resize', () => { if (sid === null) home(); this.paintThrottle(); });
+  }
+
+  /* ================================================================ tilt-to-fly */
+  // Uses gravity in the device frame, so it works however the phone is held:
+  // roll = sideways lean of the screen, pitch = fore/aft tilt relative to the
+  // attitude at calibration (mission start / resume). Confirmed on Android Chrome (installed app).
+  initTilt() {
+    if (this._tiltInit) return;
+    this._tiltInit = true;
+    this.tilt = { roll: 0, pitch: 0, zero: null, live: false };
+    const start = () => window.addEventListener('devicemotion', (e) => {
+      const a = e.accelerationIncludingGravity;
+      if (!a || a.x == null) return;
+      const ang = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+      // screen-up / screen-right components of the measured gravity reaction
+      let up, right;
+      if (ang === 90) { up = a.x; right = -a.y; } else if (ang === 270 || ang === -90) { up = -a.x; right = a.y; } else { up = a.y; right = a.x; }
+      let out = a.z;
+      if (up < 0 && Math.abs(up) > Math.abs(out)) { up = -up; right = -right; out = -out; }   // iOS reports the opposite sign
+      const t = this.tilt;
+      const roll = Math.atan2(-right, Math.hypot(up, out)), pitch = Math.atan2(out, up);
+      if (t.zero == null) t.zero = pitch;
+      t.roll += (clamp(roll / 0.45, -1, 1) - t.roll) * 0.35;
+      // top edge toward you = pull (nose up), like drawing a stick back; away = push. INVERT Y flips it.
+      t.pitch += (clamp((t.zero - pitch) / 0.32, -1, 1) - t.pitch) * 0.35;
+      t.live = true;
+    });
+    try {
+      const D = window.DeviceMotionEvent;
+      if (D && typeof D.requestPermission === 'function') D.requestPermission().then(r => { if (r === 'granted') start(); else this.tilt.denied = true; }).catch(() => { this.tilt.denied = true; });
+      else start();
+    } catch { /* no sensors */ }
+  }
+
+  /** TILT TO FLY is on but no motion data has arrived a couple of seconds into the flight: say why,
+   *  instead of the phone silently ignoring the tilt. Only when the player chose tilt. */
+  checkTilt() {
+    clearTimeout(this._tiltCheckT);
+    if (!this.isTouch || !this.settings.get('tilt')) return;
+    this._tiltCheckT = setTimeout(() => {
+      const t = this.tilt;
+      if (!this.settings.get('tilt') || !this.game.player || this.game.state !== 'playing' || (t && t.live)) return;
+      // phone browsers only hand motion sensors to https pages (a downloaded file or a http:// copy gets nothing)
+      const why = t && t.denied ? 'MOTION PERMISSION DENIED'
+        : !window.isSecureContext || location.protocol !== 'https:' ? 'NO SENSOR IN THIS COPY · USE THE ONLINE LINK'
+        : 'NO MOTION SENSOR';
+      this.toast(`TILT TO FLY: ${why} · USE THE STICK`, 'warn', 6000);
+    }, 2500);
+  }
+
+  calibrateTilt() { if (this.tilt) { this.tilt.zero = null; this.tilt.roll = 0; this.tilt.pitch = 0; } }
+
+  hasAB() { const p = this.game.player; return !!p && p.spec.ab > 1; }
+
+  paintThrottle() {
+    if (!this.touchActive) return;
+    const knob = this.$('throttle-knob'), track = this.$('throttle-track');
+    const h = track.clientHeight || 1;
+    knob.style.top = `${(1 - this.throttle) * h}px`;
+    const ab = this.hasAB();
+    this.$('ab-mark').style.display = ab ? '' : 'none';
+    knob.classList.toggle('ab', ab && this.throttle > AB_DETENT + 0.02);
+    if (this._stickHome && !this.stick.on) this._stickHome();
+  }
+
+  /* ================================================================ per-frame */
+
+  consumeLook() {
+    const l = this._look;
+    l.dx = this.lookD.dx; l.dy = this.lookD.dy;
+    this.lookD.dx = 0; this.lookD.dy = 0;
+    return l;
+  }
+
+  getInput() {
+    const k = this.keys, inp = this.input, s = this.settings;
+    const sens = s.get('sensitivity'), inv = s.get('invertY') ? -1 : 1;
+    let pitch = 0, roll = 0, yaw = 0, fire = !!k.Space || this.mouse.fire || this.touchFire, brake = !!k.KeyB || this.touchBrake;
+
+    // keyboard: S / down-arrow pulls, like a real stick
+    if (k.KeyS || k.ArrowDown) pitch += 1;
+    if (k.KeyW || k.ArrowUp) pitch -= 1;
+    if (k.KeyA || k.ArrowLeft) roll -= 1;
+    if (k.KeyD || k.ArrowRight) roll += 1;
+    if (k.KeyQ) yaw -= 1;
+    if (k.KeyE) yaw += 1;
+    if (k.ShiftLeft || k.ShiftRight || k.Equal) this.throttle += 0.012;
+    if (k.ControlLeft || k.ControlRight || k.Minus) this.throttle -= 0.012;
+    if (k.Digit1) this.throttle = 0; if (k.Digit2) this.throttle = 0.4; if (k.Digit3) this.throttle = 0.7;
+    if (k.Digit4) this.throttle = AB_DETENT - 0.01; if (k.Digit5) this.throttle = 1;
+
+    if (this.mouse.locked) {
+      pitch += this.mouse.dy * 0.012 * inv * sens;
+      roll += this.mouse.dx * 0.012 * sens;
+    }
+    this.mouse.dx = 0; this.mouse.dy = 0;
+
+    if (this.stick.on) {
+      const m = Math.min(1, sens);          // "soft" shortens the throw, "sharp" removes the expo
+      const f = sens > 1 ? (v) => v : expo;
+      pitch += f(this.stick.y) * inv * m;   // pull DOWN = nose UP by default
+      roll += f(this.stick.x) * m;
+    }
+
+    // tilt-to-fly is ignored while the autopilot flies (holding the phone must not take over)
+    if (this.tilt && this.tilt.live && s.get('tilt') && !this.stick.on && !this.game.ap) {
+      pitch += expo(this.tilt.pitch) * inv * sens;
+      roll += expo(this.tilt.roll) * sens;
+    }
+
+    // gamepad (standard mapping)
+    const pads = navigator.getGamepads ? navigator.getGamepads() : null;
+    const gp = pads && (pads[0] || pads[1]);
+    if (gp && gp.connected) {
+      const dz = (v) => (Math.abs(v) < 0.12 ? 0 : (v - Math.sign(v) * 0.12) / 0.88);
+      const ax = gp.axes, b = gp.buttons, on = (i) => !!(b[i] && b[i].pressed), g = this.game, pv = this.pad.prev;
+      roll += expo(dz(ax[0] || 0)) * sens; pitch += expo(dz(ax[1] || 0)) * inv * sens;
+      this.lookD.dx += dz(ax[2] || 0) * 9; this.lookD.dy += dz(ax[3] || 0) * 9;
+      const rt = b[7] ? b[7].value : 0, lt = b[6] ? b[6].value : 0;
+      if (rt > 0.3 || on(0)) fire = true;
+      if (lt > 0.3) brake = true;
+      if (on(5)) this.throttle += 0.012;
+      if (on(4)) this.throttle -= 0.012;
+      yaw += (on(15) ? 1 : 0) - (on(14) ? 1 : 0);
+      const edge = (i, fn) => { const d = on(i); if (d && !pv[i]) fn(); pv[i] = d; };
+      edge(1, () => g.fireMissile()); edge(2, () => g.dropFlare()); edge(3, () => g.cycleTarget());
+      edge(12, () => g.cycleView()); edge(13, () => g.toggleGear()); edge(9, () => this.togglePause());
+      edge(11, () => g.eject());
+      edge(8, () => { const i = AP_MODES.indexOf(g.ap ? g.ap.mode : ''); g.setAP(i + 1 < AP_MODES.length ? AP_MODES[i + 1] : 'off'); });   // Back/Select: cycle autopilot modes
+      { const d = on(10); if (d && !pv[10]) g.latchPress(); else if (!d && pv[10]) g.latchRelease(); pv[10] = d; }   // L3: tap / hold like LATCH
+    }
+
+    const t0 = this.throttle;
+    this.throttle = clamp(this.throttle, 0, 1);
+    if (t0 !== inp.throttle) this.paintThrottle();
+    inp.pitch = clamp(pitch, -1, 1); inp.roll = clamp(roll, -1, 1); inp.yaw = clamp(yaw, -1, 1);
+    inp.throttle = this.throttle; inp.fire = fire; inp.brake = brake;
+    return inp;
+  }
+}

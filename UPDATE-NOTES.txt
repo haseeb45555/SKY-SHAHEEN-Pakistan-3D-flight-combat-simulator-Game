@@ -1,0 +1,40 @@
+SKY SHAHEEN - AIR COMMAND UI UPDATE
+
+Changes in this revision:
+- Hangar aircraft and mission cards now use responsive grids instead of long horizontal strips, preventing the clipped/half-hidden cards shown in the supplied screenshot.
+- Reworked the hangar palette into a Pakistan Air Force-inspired command-console theme: graphite/olive panels, sand-gold accents, restrained tactical grid texture, and clearer selected states.
+- Restyled pause/debrief dialogs and autopilot/wingman panels to match the air-command theme.
+- Tightened the hangar showcase camera and aircraft staging so the selected aircraft occupies more of the visible scene.
+- Hostile aircraft now use the detailed aircraft mesh LOD rather than the simplified low-detail mesh, improving their silhouette/readability at distance (with a higher rendering cost in large dogfights).
+- Added explicit target HP percentage labels and thicker health bars for selected targets, including off-screen target cues.
+- Preserved aircraft selection, existing flight controls, missions, and the existing aircraft meshes.
+
+Validation:
+- JavaScript syntax checks passed for modified modules.
+- A full Vite build and automated flight tests could not be run in this environment because the ZIP's node_modules is incomplete (Vite and the Three.js package entry are missing). Run `npm ci` then `npm run build` and `npm test` locally before deployment.
+
+---
+NEW MENU (radar room)
+- Hangar, pause and debrief rebuilt: live radar scope background, flight-strip lists, Aircraft / Mission / Setup tabs, SCRAMBLE button.
+- New files: src/ui/RadarScope.js, css/fonts.css (embedded Anton + Roboto Condensed).
+- Changed: index.html, css/main.css, src/ui/UI.js, src/engine/Game.js (hangar jet framed to the right of the panel).
+- Run `npm ci` then `npm run build` locally before deploying.
+
+PAF FIELD + J-10CE UPDATE (2026-11-26)
+- Added a selectable J-10CE PAF fighter variant with close-coupled canards, revised delta wing surfaces, PAF tail insignia, and tuned game flight characteristics.
+- Added three Pakistan flagpoles beside the home airbase operations tower.
+- Increased touch joystick and mobile action-button hit areas for easier phone play.
+- Preserved existing aircraft, mobile touch input, and menu/pause music implementation.
+- Validation: JavaScript syntax checks and aircraft data checks pass. Full Vite build/test suite could not run because npm dependencies are incomplete and registry access timed out.
+
+2026-11-26 — Mobile smoothness and creator identity
+- Auto graphics now selects a mobile-focused renderer profile on touch devices: capped render pixel ratio, no expensive post-processing/shadows, with adaptive resolution retained for frame-time stability.
+- Creator signature redesigned for the hangar menu with visible GitHub and LinkedIn icon cards and thumb-friendly tap targets.
+- Creator links point to the existing Haseeb Ullah profiles in the project source.
+
+
+WINGMAN UPDATE
+- Added CALL / DISMISS WINGMAN 1 and WINGMAN 2 controls.
+- The player can fly with two friendly escorts (three aircraft total).
+- Wingman 2 uses the opposite formation side and a lightweight aircraft mesh to reduce mobile rendering cost.
+- Touch buttons and keyboard shortcuts are available in the in-flight WINGMAN panel (1-2 call/dismiss, 3-8 commands, 0 close).
